@@ -1,15 +1,18 @@
-
 from typing import Tuple, Any
 import numpy as np
 import SimpleITK as sitk
 import pydicom
 import gzip
 import warnings
+
 with warnings.catch_warnings():
     # disable FutureWarning: conversion of the second argument of issubdtype from `float` to `np.floating` is deprecated
     warnings.filterwarnings("ignore", category=FutureWarning)
     import nibabel as nib
     import h5py
+
+# Add nrrd import for NRRD support
+import nrrd
 
 from common.exceptionmanager import catch_error_exception
 from common.functionutil import fileextension
@@ -32,7 +35,9 @@ class ImageFileReader(object):
     @classmethod
     def update_image_metadata_info(cls, filename: str, **kwargs) -> Any:
         in_metadata = cls.get_image_metadata_info(filename)
-        return cls._get_filereader_class(filename).update_image_metadata_info(in_metadata, **kwargs)
+        return cls._get_filereader_class(filename).update_image_metadata_info(
+            in_metadata, **kwargs
+        )
 
     @classmethod
     def get_image_size(cls, filename: str) -> Tuple[int, int, int]:
@@ -47,23 +52,72 @@ class ImageFileReader(object):
         cls._get_filereader_class(filename).write_image(filename, in_image, **kwargs)
 
     @staticmethod
-    def _get_filereader_class(filename: str) -> 'ImageFileReader':
+    def _get_filereader_class(filename: str) -> "ImageFileReader":
         extension = fileextension(filename)
-        if extension == '.nii' or extension == '.nii.gz':
+        if extension == ".nii" or extension == ".nii.gz":
             return NiftiReader
-        elif extension == '.dcm':
+        elif extension == ".dcm":
             return DicomReader
-        elif extension == '.mhd':
+        elif extension == ".mhd":
             return MHDRawReader
-        elif extension == '.npy':
+        elif extension == ".npy":
             return NumpyReader
-        elif extension == '.npz':
+        elif extension == ".npz":
             return NumpyZReader
-        elif extension == '.hdf5':
+        elif extension == ".hdf5":
             return Hdf5Reader
+        elif extension == ".nrrd":
+            return NrrdReader
         else:
             message = "Not valid file extension: %s..." % (extension)
             catch_error_exception(message)
+
+
+class NrrdReader(ImageFileReader):
+    @classmethod
+    def get_image_position(cls, filename: str) -> Tuple[float, float, float]:
+        image = sitk.ReadImage(filename)
+        try:
+            origin = image.GetOrigin()
+            return tuple(origin)
+        except Exception:
+            return (0.0, 0.0, 0.0)
+
+    @classmethod
+    def get_image_voxelsize(cls, filename: str) -> Tuple[float, float, float]:
+        image = sitk.ReadImage(filename)
+        try:
+            spacing = image.GetSpacing()
+            return tuple(spacing)
+        except Exception:
+            return (1.0, 1.0, 1.0)
+
+    @classmethod
+    def get_image_metadata_info(cls, filename: str) -> Any:
+        image = sitk.ReadImage(filename)
+        metadata_keys = image.GetMetaDataKeys()
+        return {key: image.GetMetaData(key) for key in metadata_keys}
+
+    @classmethod
+    def get_image(cls, filename: str) -> np.ndarray:
+        image = sitk.ReadImage(filename)
+        return sitk.GetArrayFromImage(image)
+
+    @classmethod
+    def write_image(cls, filename: str, in_image: np.ndarray, **kwargs) -> None:
+        image = sitk.GetImageFromArray(in_image)
+        if "metadata" in kwargs:
+            metadata = kwargs["metadata"]
+            for key, val in metadata.items():
+                image.SetMetaData(key, val)
+        sitk.WriteImage(image, filename)
+
+    @classmethod
+    def update_image_metadata_info(cls, in_metadata: Any, **kwargs) -> Any:
+        if "target_metadata" in kwargs:
+            target_metadata = kwargs["target_metadata"]
+            in_metadata.update(target_metadata)
+        return in_metadata
 
 
 class NiftiReader(ImageFileReader):
@@ -94,8 +148,8 @@ class NiftiReader(ImageFileReader):
 
     @classmethod
     def write_image(cls, filename: str, in_image: np.ndarray, **kwargs) -> None:
-        if 'metadata' in kwargs.keys():
-            affine = kwargs['metadata']
+        if "metadata" in kwargs.keys():
+            affine = kwargs["metadata"]
             affine = cls._fix_dims_affine_matrix(affine)
         else:
             affine = None
@@ -105,15 +159,20 @@ class NiftiReader(ImageFileReader):
 
     @classmethod
     def update_image_metadata_info(cls, in_metadata: Any, **kwargs) -> Any:
-        rescale_factor = kwargs['rescale_factor'] if 'rescale_factor' in kwargs.keys() else None
-        translate_factor = kwargs['translate_factor'] if 'translate_factor' in kwargs.keys() else None
+        rescale_factor = (
+            kwargs["rescale_factor"] if "rescale_factor" in kwargs.keys() else None
+        )
+        translate_factor = (
+            kwargs["translate_factor"] if "translate_factor" in kwargs.keys() else None
+        )
         return cls._update_affine_matrix(in_metadata, rescale_factor, translate_factor)
 
     @staticmethod
-    def _compute_affine_matrix(image_voxelsize: Tuple[float, float, float],
-                               image_position: Tuple[float, float, float],
-                               # image_rotation: : Tuple[float, float, float]
-                               ) -> np.ndarray:
+    def _compute_affine_matrix(
+        image_voxelsize: Tuple[float, float, float],
+        image_position: Tuple[float, float, float],
+        # image_rotation: : Tuple[float, float, float]
+    ) -> np.ndarray:
         # Consider only affine transformations of rescaling and translation
         affine = np.eye(4)
         if image_voxelsize is not None:
@@ -123,11 +182,12 @@ class NiftiReader(ImageFileReader):
         return affine
 
     @staticmethod
-    def _update_affine_matrix(inout_affine: np.ndarray,
-                              rescale_factor: Tuple[float, float, float],
-                              translate_factor: Tuple[float, float, float],
-                              # rotate_factor: Tuple[float, float, float]
-                              ) -> np.ndarray:
+    def _update_affine_matrix(
+        inout_affine: np.ndarray,
+        rescale_factor: Tuple[float, float, float],
+        translate_factor: Tuple[float, float, float],
+        # rotate_factor: Tuple[float, float, float]
+    ) -> np.ndarray:
         # Consider only affine transformations of rescaling and translation
         if rescale_factor is not None:
             rescale_matrix = np.eye(rescale_factor + (1,))
@@ -165,9 +225,11 @@ class NiftiReader(ImageFileReader):
         return np.flip(in_image, 1)
 
     @staticmethod
-    def fix_dims_image_affine_matrix_from_dicom2niix(inout_affine: np.ndarray) -> np.ndarray:
-        inout_affine[1, 1] = - inout_affine[1, 1]
-        inout_affine[1, -1] = - inout_affine[1, -1]
+    def fix_dims_image_affine_matrix_from_dicom2niix(
+        inout_affine: np.ndarray,
+    ) -> np.ndarray:
+        inout_affine[1, 1] = -inout_affine[1, 1]
+        inout_affine[1, -1] = -inout_affine[1, -1]
         return inout_affine
 
 
@@ -176,17 +238,21 @@ class DicomReader(ImageFileReader):
     @classmethod
     def get_image_position(cls, filename: str) -> Tuple[float, float, float]:
         ds = pydicom.read_file(filename)
-        image_position_str = ds[0x0020, 0x0032].value   # Elem 'Image Position (Patient)'
-        return (float(image_position_str[0]),
-                float(image_position_str[1]),
-                float(image_position_str[2]))
+        image_position_str = ds[0x0020, 0x0032].value  # Elem 'Image Position (Patient)'
+        return (
+            float(image_position_str[0]),
+            float(image_position_str[1]),
+            float(image_position_str[2]),
+        )
 
     @classmethod
     def get_image_voxelsize(cls, filename: str) -> Tuple[float, float, float]:
         ds = pydicom.read_file(filename)
-        return (float(ds.SpacingBetweenSlices),
-                float(ds.PixelSpacing[0]),
-                float(ds.PixelSpacing[1]))
+        return (
+            float(ds.SpacingBetweenSlices),
+            float(ds.PixelSpacing[0]),
+            float(ds.PixelSpacing[1]),
+        )
 
     @classmethod
     def get_image_metadata_info(cls, filename: str) -> Any:
@@ -204,25 +270,30 @@ class DicomReader(ImageFileReader):
         if in_image.dtype != np.uint16:
             in_image = in_image.astype(np.uint16)
         image_write = sitk.GetImageFromArray(in_image)
-        if 'metadata' in kwargs.keys():
-            dict_metadata = kwargs['metadata']
-            for (key, val) in dict_metadata.items():
+        if "metadata" in kwargs.keys():
+            dict_metadata = kwargs["metadata"]
+            for key, val in dict_metadata.items():
                 image_write.SetMetaData(key, val)
         sitk.WriteImage(image_write, filename)
 
     @classmethod
     def update_image_metadata_info(cls, in_metadata: Any, **kwargs) -> Any:
-        if 'target_metadata' in kwargs.keys():
-            target_metadata = kwargs['target_metadata']
+        if "target_metadata" in kwargs.keys():
+            target_metadata = kwargs["target_metadata"]
             return cls._update_headertags_physical_info(in_metadata, target_metadata)
         else:
             return None
 
     @staticmethod
-    def get_dicom_header(filename: str, is_return_tags_description: bool = False) -> Any:
+    def get_dicom_header(
+        filename: str, is_return_tags_description: bool = False
+    ) -> Any:
         header_read = pydicom.read_file(filename)
         if is_return_tags_description:
-            return {key: (header_read[key].repval, header_read[key].name) for key in header_read.keys()}
+            return {
+                key: (header_read[key].repval, header_read[key].name)
+                for key in header_read.keys()
+            }
         else:
             return {key: header_read[key].repval for key in header_read.keys()}
 
@@ -244,13 +315,20 @@ class DicomReader(ImageFileReader):
         return in_image
 
     @staticmethod
-    def _update_headertags_physical_info(inout_metadata: Any, target_metadata: Any) -> Any:
+    def _update_headertags_physical_info(
+        inout_metadata: Any, target_metadata: Any
+    ) -> Any:
         # Dicom header tags for info of i) world coordinates and ii) voxel size
-        tag_image_position = '0020|0032'
-        tag_image_orientation = '0020|0037'
-        tag_spacing_slices = '0018|0088'
-        tag_pixel_spacing = '0028|0030'
-        list_tags_update = [tag_image_position, tag_image_orientation, tag_spacing_slices, tag_pixel_spacing]
+        tag_image_position = "0020|0032"
+        tag_image_orientation = "0020|0037"
+        tag_spacing_slices = "0018|0088"
+        tag_pixel_spacing = "0028|0030"
+        list_tags_update = [
+            tag_image_position,
+            tag_image_orientation,
+            tag_spacing_slices,
+            tag_pixel_spacing,
+        ]
         for itag in list_tags_update:
             inout_metadata[itag] = target_metadata[itag]
         return inout_metadata
@@ -284,7 +362,7 @@ class NumpyZReader(ImageFileReader):
 
     @classmethod
     def get_image(cls, filename: str) -> np.ndarray:
-        return np.load(filename)['arr_0']
+        return np.load(filename)["arr_0"]
 
     @classmethod
     def write_image(cls, filename: str, in_image: np.ndarray, **kwargs) -> None:
@@ -295,13 +373,13 @@ class Hdf5Reader(ImageFileReader):
 
     @classmethod
     def get_image(cls, filename: str) -> np.ndarray:
-        data_file = h5py.File(filename, 'r')
-        return data_file['data'][:]
+        data_file = h5py.File(filename, "r")
+        return data_file["data"][:]
 
     @classmethod
     def write_image(cls, filename: str, in_image: np.ndarray, **kwargs) -> None:
-        data_file = h5py.File(filename, 'w')
-        data_file.create_dataset('data', data=in_image)
+        data_file = h5py.File(filename, "w")
+        data_file.create_dataset("data", data=in_image)
         data_file.close()
 
 
@@ -309,11 +387,11 @@ class GzipManager(object):
 
     @staticmethod
     def get_read_file(filename: str) -> Any:
-        return gzip.GzipFile(filename, 'r')
+        return gzip.GzipFile(filename, "r")
 
     @staticmethod
     def get_write_file(filename: str) -> Any:
-        return gzip.GzipFile(filename, 'w')
+        return gzip.GzipFile(filename, "w")
 
     @staticmethod
     def close_file(fileobj: Any) -> None:
@@ -321,6 +399,8 @@ class GzipManager(object):
 
 
 # all available file readers
-DICT_AVAIL_FILE_READER = {'nifti': NiftiReader,
-                          'dicom': DicomReader,
-                          'numpy': NumpyReader}
+DICT_AVAIL_FILE_READER = {
+    "nifti": NiftiReader,
+    "dicom": DicomReader,
+    "numpy": NumpyReader,
+}
